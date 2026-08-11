@@ -1,35 +1,35 @@
-# Sales Data Pipeline
+# Log Monitoring & Alerting Pipeline
 
-A record-oriented ETL pipeline that ingests CSV sales data, validates it, splits it into categories based on order value, and writes the results as JSON.
+A text-processing pipeline that ingests unstructured application log files, classifies each line by severity, tracks error counts in real time, and separates critical alerts from routine logs.
 
 ## Architecture
 
 ```
-GetFile → ValidateRecord → QueryRecord → RouteOnAttribute (implicit via SQL) → PutFile
-                  ↓ invalid
-              PutFile (invalid records)
+GetFile → SplitText → RouteText ─┬─ error_line → UpdateCounter → UpdateAttribute → PutFile (critical_alert)
+                                  ├─ warn_line  → MergeContent → UpdateAttribute → PutFile (warning)
+                                  └─ info_line  → MergeContent → UpdateAttribute → PutFile (info_logs)
 ```
 
 ## Flow
 
-1. **GetFile** watches an input directory for new CSV files.
-2. **ValidateRecord** reads the CSV using a `CSVReader` controller service and writes it out as JSON via `JsonRecordSetWriter`. Records that fail schema validation are routed separately.
-3. **QueryRecord** runs SQL directly against the in-flight FlowFile content — `SELECT * FROM FLOWFILE WHERE amount > 1000` — splitting records into `big_orders` and `normal_orders` relationships without needing an external database.
-4. **PutFile** (x3) writes each category to its own output directory as JSON.
-5. **UpdateAttribute** generates a unique filename (`${filename}_${now():format('yyyyMMddHHmmssSSS')}_${UUID()}`) before each write, avoiding file name collisions in the output directories.
+1. **GetFile** picks up `.log` files from a watched directory.
+2. **SplitText** breaks the file into one FlowFile per line, since log files have no fixed schema and must be evaluated line by line.
+3. **RouteText** classifies each line by substring match (`ERROR`, `WARN`, `INFO`) into separate relationships.
+4. **Error lines** go through **UpdateCounter**, which increments an in-memory NiFi counter (viewable live under *Counters* in the UI — no external code required) before being written immediately, one file per error, for fast alerting.
+5. **Warning and info lines** are batched via **MergeContent** before being written, since they don't need immediate individual handling.
+6. **UpdateAttribute** generates a unique filename per output to avoid file collisions.
 
 ## Key concepts demonstrated
 
-- **Record-oriented processing**: treating CSV rows as structured records rather than raw text, enabling schema-aware transformations.
-- **In-flight SQL querying**: using `QueryRecord` to filter and route data without a database round-trip.
-- **Controller Services**: sharing `CSVReader` / `JsonRecordSetWriter` configurations across multiple processors.
-- **Data quality gaps**: records that don't match any downstream condition (e.g. negative amounts) are silently dropped unless explicitly handled — a real-world lesson in why strict schema validation matters.
+- **Unstructured text processing**: handling data with no fixed schema, as opposed to the CSV/JSON pipelines in the other projects.
+- **Pattern-based routing**: classifying content with `RouteText` (substring or regex matching) rather than SQL or Expression Language.
+- **Built-in observability**: using NiFi's native `UpdateCounter` / Counters UI for live metrics instead of building custom counting logic.
+- **Real-time vs. batch handling**: critical events are processed individually and immediately, while routine events are batched for efficiency — a common pattern in production alerting systems.
 
 ## Sample data
 
-`sample-data/sales_sample.csv` — a small CSV with intentionally invalid rows (missing country, negative amount) to exercise the validation and routing logic.
+`sample-data/app.log` — a small log file with a mix of INFO, WARN, and ERROR lines.
 
 ## Prerequisites
 
 - Apache NiFi 2.x
-- Controller Services: `CSVReader`, `JsonRecordSetWriter` (must be created and enabled after import)
